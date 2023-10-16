@@ -51,7 +51,6 @@ import {
   validateDialogType,
   waitForHTTP,
 } from '../common/util.js';
-import {timeout} from '../common/util.js';
 import type {Viewport} from '../common/Viewport.js';
 import {assert} from '../util/assert.js';
 import {Deferred} from '../util/Deferred.js';
