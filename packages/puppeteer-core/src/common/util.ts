@@ -633,3 +633,8 @@ export async function waitForHTTP<T extends {url(): string}>(
     )
   );
 }
+
+/**
+ * @internal
+ */
+export const NETWORK_IDLE_TIME = 500;

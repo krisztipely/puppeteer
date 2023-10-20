@@ -19,17 +19,14 @@ import * as Bidi from 'chromium-bidi/lib/cjs/protocol/protocol.js';
 import type {ObservableInput} from '../../third_party/rxjs/rxjs.js';
 import {
   type Observable,
-  firstValueFrom,
   from,
   fromEvent,
   merge,
-  raceWith,
-  switchMap,
-  delayWhen,
   map,
-  catchError,
   forkJoin,
   first,
+  firstValueFrom,
+  raceWith,
 } from '../../third_party/rxjs/rxjs.js';
 import type {CDPSession} from '../api/CDPSession.js';
 import {
@@ -38,19 +35,26 @@ import {
   type WaitForOptions,
   throwIfDetached,
 } from '../api/Frame.js';
-import {ProtocolError, TimeoutError} from '../common/Errors.js';
 import type {TimeoutSettings} from '../common/TimeoutSettings.js';
 import type {Awaitable} from '../common/types.js';
-import {UTILITY_WORLD_NAME, setPageContent} from '../common/util.js';
-import {timeout} from '../common/util.js';
+import {
+  NETWORK_IDLE_TIME,
+  UTILITY_WORLD_NAME,
+  setPageContent,
+  timeout,
+} from '../common/util.js';
 import {Deferred} from '../util/Deferred.js';
 import {disposeSymbol} from '../util/disposable.js';
 
 import type {BrowsingContext} from './BrowsingContext.js';
 import {ExposeableFunction} from './ExposedFunction.js';
 import type {BidiHTTPResponse} from './HTTPResponse.js';
-import type {BiDiNetworkLifecycle} from './lifecycle.js';
-import {getBiDiLifecycleEvent, getBiDiReadynessState} from './lifecycle.js';
+import type {BiDiNetworkIdle} from './lifecycle.js';
+import {
+  getBiDiLifecycleEvent,
+  getBiDiReadinessState,
+  rewriteNavigationError,
+} from './lifecycle.js';
 import type {BidiPage} from './Page.js';
 import {
   MAIN_SANDBOX,
@@ -131,21 +135,25 @@ export class BidiFrame extends Frame {
   ): Promise<BidiHTTPResponse | null> {
     const {
       waitUntil = 'load',
-      timeout = this.#timeoutSettings.navigationTimeout(),
+      timeout: ms = this.#timeoutSettings.navigationTimeout(),
     } = options;
 
-    const [wait, network] = getBiDiReadynessState(waitUntil);
+    const [readiness, networkIdle] = getBiDiReadinessState(waitUntil);
 
-    return await this._waitBidiLifecycleAndNetworkIdle(
-      this.#context.connection.send('browsingContext.navigate', {
-        context: this.#context.id,
-        url,
-        wait,
-      }),
-      network,
-      url,
-      timeout
+    const response = await firstValueFrom(
+      this._waitWithNetworkIdle(
+        this.#context.connection.send('browsingContext.navigate', {
+          context: this.#context.id,
+          url,
+          wait: readiness,
+        }),
+        networkIdle
+      )
+        .pipe(raceWith(timeout(ms), from(this.#abortDeferred.valueOrThrow())))
+        .pipe(rewriteNavigationError(url, ms))
     );
+
+    return this.#page.getNavigationResponse(response?.result.navigation);
   }
 
   @throwIfDetached
@@ -155,23 +163,25 @@ export class BidiFrame extends Frame {
   ): Promise<void> {
     const {
       waitUntil = 'load',
-      timeout = this.#timeoutSettings.navigationTimeout(),
+      timeout: ms = this.#timeoutSettings.navigationTimeout(),
     } = options;
 
-    const [waitEvent, network] = getBiDiLifecycleEvent(waitUntil);
+    const [waitEvent, networkIdle] = getBiDiLifecycleEvent(waitUntil);
 
-    await this._waitBidiLifecycleAndNetworkIdle(
-      forkJoin([
-        fromEvent(this.#context, waitEvent).pipe(first()),
-        from(setPageContent(this, html)),
-      ]).pipe(
-        map(() => {
-          return null;
-        })
-      ),
-      network,
-      'setContent',
-      timeout
+    await firstValueFrom(
+      this._waitWithNetworkIdle(
+        forkJoin([
+          fromEvent(this.#context, waitEvent).pipe(first()),
+          from(setPageContent(this, html)),
+        ]).pipe(
+          map(() => {
+            return null;
+          })
+        ),
+        networkIdle
+      )
+        .pipe(raceWith(timeout(ms), from(this.#abortDeferred.valueOrThrow())))
+        .pipe(rewriteNavigationError('setContent', ms))
     );
   }
 
@@ -188,28 +198,38 @@ export class BidiFrame extends Frame {
       timeout: ms = this.#timeoutSettings.navigationTimeout(),
     } = options;
 
-    const [waitUntilEvent] = getBiDiLifecycleEvent(waitUntil);
-    const info = await firstValueFrom(
-      merge(
+    const [waitUntilEvent, networkIdle] = getBiDiLifecycleEvent(waitUntil);
+
+    const navigatedObservable = merge(
+      forkJoin([
         fromEvent(
           this.#context,
           Bidi.ChromiumBidi.BrowsingContext.EventNames.NavigationStarted
-        ).pipe(
-          switchMap(() => {
-            return fromEvent(
-              this.#context,
-              waitUntilEvent
-            ) as Observable<Bidi.BrowsingContext.NavigationInfo>;
-          })
-        ),
-        fromEvent(
-          this.#context,
-          Bidi.ChromiumBidi.BrowsingContext.EventNames.FragmentNavigated
-        ) as Observable<Bidi.BrowsingContext.NavigationInfo>
-      ).pipe(raceWith(timeout(ms), from(this.#abortDeferred.valueOrThrow())))
+        ).pipe(first()),
+        fromEvent(this.#context, waitUntilEvent).pipe(
+          first()
+        ) as Observable<Bidi.BrowsingContext.NavigationInfo>,
+      ]),
+      fromEvent(
+        this.#context,
+        Bidi.ChromiumBidi.BrowsingContext.EventNames.FragmentNavigated
+      ) as Observable<Bidi.BrowsingContext.NavigationInfo>
+    ).pipe(
+      map(result => {
+        if (Array.isArray(result)) {
+          return {result: result[1]};
+        }
+        return {result};
+      })
     );
 
-    return this.#page.getNavigationResponse(info.navigation);
+    const response = await firstValueFrom(
+      this._waitWithNetworkIdle(navigatedObservable, networkIdle).pipe(
+        raceWith(timeout(ms), from(this.#abortDeferred.valueOrThrow()))
+      )
+    );
+
+    return this.#page.getNavigationResponse(response?.result.navigation);
   }
 
   override get detached(): boolean {
@@ -248,45 +268,29 @@ export class BidiFrame extends Frame {
   }
 
   /** @internal */
-  async _waitBidiLifecycleAndNetworkIdle(
+  _waitWithNetworkIdle(
     observableInput: ObservableInput<{
       result: Bidi.BrowsingContext.NavigateResult;
     } | null>,
-    network: BiDiNetworkLifecycle,
-    message: string,
-    ms: number
-  ): Promise<BidiHTTPResponse | null> {
-    return await firstValueFrom(
-      from(observableInput).pipe(
-        delayWhen(() => {
-          const networkIdle = network
-            ? this.#page._waitForNetworkIdle(
-                this.#page._networkManager,
-                500,
-                ms,
-                this.#abortDeferred,
-                network === 'networkidle0' ? 0 : 2
-              )
-            : Promise.resolve();
+    networkIdle: BiDiNetworkIdle
+  ): Observable<{
+    result: Bidi.BrowsingContext.NavigateResult;
+  } | null> {
+    const delay = networkIdle
+      ? this.#page._waitForNetworkIdle(
+          this.#page._networkManager,
+          NETWORK_IDLE_TIME,
+          networkIdle === 'networkidle0' ? 0 : 2
+        )
+      : from(Promise.resolve());
 
-          return from(networkIdle);
-        }),
-        map(async response => {
-          if (response) {
-            return this.#page.getNavigationResponse(response.result.navigation);
-          }
-          return null;
-        }),
-        raceWith(timeout(ms)),
-        catchError(error => {
-          if (error instanceof ProtocolError) {
-            error.message += ` at ${message}`;
-          } else if (error instanceof TimeoutError) {
-            error.message = `Navigation timeout of ${ms} ms exceeded`;
-          }
-          throw error;
-        })
-      )
+    return forkJoin([
+      from(observableInput).pipe(first()),
+      delay.pipe(first()),
+    ]).pipe(
+      map(([response]) => {
+        return response;
+      })
     );
   }
 }

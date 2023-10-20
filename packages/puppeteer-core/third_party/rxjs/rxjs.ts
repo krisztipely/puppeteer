@@ -20,10 +20,12 @@ export {
   defaultIfEmpty,
   defer,
   delay,
+  delayWhen,
   EMPTY,
   filter,
   first,
   firstValueFrom,
+  forkJoin,
   from,
   fromEvent,
   identity,
@@ -34,9 +36,7 @@ export {
   mergeMap,
   NEVER,
   noop,
-  Observable,
   of,
-  OperatorFunction,
   pipe,
   race,
   raceWith,
@@ -47,10 +47,9 @@ export {
   tap,
   throwIfEmpty,
   timer,
-  delayWhen,
-  forkJoin,
-  ObservableInput,
 } from 'rxjs';
+
+export type * from 'rxjs';
 
 import {filter, from, map, mergeMap, type Observable} from 'rxjs';
 

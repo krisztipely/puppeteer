@@ -47,6 +47,7 @@ import type {Awaitable} from '../common/types.js';
 import {
   debugError,
   evaluationString,
+  NETWORK_IDLE_TIME,
   timeout,
   validateDialogType,
   waitForHTTP,
@@ -72,7 +73,7 @@ import type {BidiHTTPRequest} from './HTTPRequest.js';
 import type {BidiHTTPResponse} from './HTTPResponse.js';
 import {BidiKeyboard, BidiMouse, BidiTouchscreen} from './Input.js';
 import type {BidiJSHandle} from './JSHandle.js';
-import {getBiDiReadynessState} from './lifecycle.js';
+import {getBiDiReadinessState, rewriteNavigationError} from './lifecycle.js';
 import {BidiNetworkManager} from './NetworkManager.js';
 import {createBidiHandle} from './Realm.js';
 import {BidiSerializer} from './Serializer.js';
@@ -455,7 +456,7 @@ export class BidiPage extends Page {
     this.emit(PageEvent.Dialog, dialog);
   }
 
-  getNavigationResponse(id: string | null): BidiHTTPResponse | null {
+  getNavigationResponse(id?: string | null): BidiHTTPResponse | null {
     return this._networkManager.getNavigationResponse(id);
   }
 
@@ -484,20 +485,25 @@ export class BidiPage extends Page {
   ): Promise<BidiHTTPResponse | null> {
     const {
       waitUntil = 'load',
-      timeout = this._timeoutSettings.navigationTimeout(),
+      timeout: ms = this._timeoutSettings.navigationTimeout(),
     } = options;
 
-    const [wait, network] = getBiDiReadynessState(waitUntil);
+    const [readiness, networkIdle] = getBiDiReadinessState(waitUntil);
 
-    return await this.mainFrame()._waitBidiLifecycleAndNetworkIdle(
-      this.#connection.send('browsingContext.reload', {
-        context: this.mainFrame()._id,
-        wait,
-      }),
-      network,
-      this.url(),
-      timeout
+    const response = await firstValueFrom(
+      this.mainFrame()
+        ._waitWithNetworkIdle(
+          this.#connection.send('browsingContext.reload', {
+            context: this.mainFrame()._id,
+            wait: readiness,
+          }),
+          networkIdle
+        )
+        .pipe(raceWith(timeout(ms), from(this.#closedDeferred.valueOrThrow())))
+        .pipe(rewriteNavigationError(this.url(), ms))
     );
+
+    return this.getNavigationResponse(response?.result.navigation);
   }
 
   override setDefaultNavigationTimeout(timeout: number): void {
@@ -702,13 +708,15 @@ export class BidiPage extends Page {
   override async waitForNetworkIdle(
     options: {idleTime?: number; timeout?: number} = {}
   ): Promise<void> {
-    const {idleTime = 500, timeout = this._timeoutSettings.timeout()} = options;
+    const {
+      idleTime = NETWORK_IDLE_TIME,
+      timeout: ms = this._timeoutSettings.timeout(),
+    } = options;
 
-    await this._waitForNetworkIdle(
-      this._networkManager,
-      idleTime,
-      timeout,
-      this.#closedDeferred
+    await firstValueFrom(
+      this._waitForNetworkIdle(this._networkManager, idleTime).pipe(
+        raceWith(timeout(ms), from(this.#closedDeferred.valueOrThrow()))
+      )
     );
   }
 

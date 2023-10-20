@@ -15,9 +15,16 @@
  */
 import * as Bidi from 'chromium-bidi/lib/cjs/protocol/protocol.js';
 
+import type {
+  ObservableInput,
+  ObservedValueOf,
+  OperatorFunction,
+} from '../../third_party/rxjs/rxjs';
+import {catchError} from '../../third_party/rxjs/rxjs';
 import type {PuppeteerLifeCycleEvent} from '../cdp/LifecycleWatcher';
+import {ProtocolError, TimeoutError} from '../common/Errors';
 
-export type BiDiNetworkLifecycle = Extract<
+export type BiDiNetworkIdle = Extract<
   PuppeteerLifeCycleEvent,
   'networkidle0' | 'networkidle2'
 > | null;
@@ -29,7 +36,7 @@ export function getBiDiLifecycles(
   event: PuppeteerLifeCycleEvent | PuppeteerLifeCycleEvent[]
 ): [
   Extract<PuppeteerLifeCycleEvent, 'load' | 'domcontentloaded'>,
-  BiDiNetworkLifecycle,
+  BiDiNetworkIdle,
 ] {
   if (Array.isArray(event)) {
     const pageLifecycle = event.some(lifecycle => {
@@ -45,7 +52,7 @@ export function getBiDiLifecycles(
         return lifecycle;
       }
       return acc;
-    }, null as BiDiNetworkLifecycle);
+    }, null as BiDiNetworkIdle);
 
     return [pageLifecycle, networkLifecycle];
   }
@@ -68,13 +75,12 @@ export const lifeCycleToReadinessState = new Map<
   ['domcontentloaded', Bidi.BrowsingContext.ReadinessState.Interactive],
 ]);
 
-export function getBiDiReadynessState(
+export function getBiDiReadinessState(
   event: PuppeteerLifeCycleEvent | PuppeteerLifeCycleEvent[]
-): [Bidi.BrowsingContext.ReadinessState, BiDiNetworkLifecycle] {
+): [Bidi.BrowsingContext.ReadinessState, BiDiNetworkIdle] {
   const lifecycle = getBiDiLifecycles(event);
-  const readyness = lifeCycleToReadinessState.get(lifecycle[0])!;
-
-  return [readyness, lifecycle[1]];
+  const readiness = lifeCycleToReadinessState.get(lifecycle[0])!;
+  return [readiness, lifecycle[1]];
 }
 
 /**
@@ -92,10 +98,23 @@ export function getBiDiLifecycleEvent(
   event: PuppeteerLifeCycleEvent | PuppeteerLifeCycleEvent[]
 ): [
   'browsingContext.load' | 'browsingContext.domContentLoaded',
-  BiDiNetworkLifecycle,
+  BiDiNetworkIdle,
 ] {
   const lifecycle = getBiDiLifecycles(event);
   const bidiEvent = lifeCycleToSubscribedEvent.get(lifecycle[0])!;
-
   return [bidiEvent, lifecycle[1]];
+}
+
+export function rewriteNavigationError<T, R extends ObservableInput<T>>(
+  message: string,
+  ms: number
+): OperatorFunction<T, T | ObservedValueOf<R>> {
+  return catchError<T, R>(error => {
+    if (error instanceof ProtocolError) {
+      error.message += ` at ${message}`;
+    } else if (error instanceof TimeoutError) {
+      error.message = `Navigation timeout of ${ms} ms exceeded`;
+    }
+    throw error;
+  });
 }
