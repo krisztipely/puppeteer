@@ -20,7 +20,6 @@ export {
   defaultIfEmpty,
   defer,
   delay,
-  delayWhen,
   EMPTY,
   filter,
   first,
