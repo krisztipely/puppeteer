@@ -20,6 +20,13 @@ All notable changes to this project will be documented in this file. See [standa
   * dependencies
     * @puppeteer/browsers bumped from 1.5.1 to 1.6.0
 
+## [21.4.1](https://github.com/puppeteer/puppeteer/compare/puppeteer-core-v21.4.0...puppeteer-core-v21.4.1) (2023-10-21)
+
+
+### Bug Fixes
+
+* typo in screencast error message ([#11213](https://github.com/puppeteer/puppeteer/issues/11213)) ([25b90b2](https://github.com/puppeteer/puppeteer/commit/25b90b2b542c4693150b67dc0c690b99f4ccfc95))
+
 ## [21.4.0](https://github.com/puppeteer/puppeteer/compare/puppeteer-core-v21.3.8...puppeteer-core-v21.4.0) (2023-10-20)
 
 
